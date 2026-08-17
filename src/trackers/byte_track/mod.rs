@@ -312,10 +312,20 @@ impl ByteTrack {
         let n_tracked = pool.len();
         pool.append(&mut self.lost_stracks);
 
-        // ByteTrack's stage-one cost is the plain IoU distance.
+        // ByteTrack's stage-one cost is the plain IoU distance. Association is
+        // class-strict on top: a track never consumes a detection of another
+        // class, so a misclassification flicker starves instead of stealing
+        // the detections of the body it overlaps.
         let pool_boxes: Vec<[f32; 4]> = pool.iter().map(|s| s.tlwh).collect();
         let high_boxes: Vec<[f32; 4]> = detections_high.iter().map(|s| s.tlwh).collect();
-        let cost = crate::utils::geometry::iou_cost_matrix(&pool_boxes, &high_boxes);
+        let mut cost = crate::utils::geometry::iou_cost_matrix(&pool_boxes, &high_boxes);
+        for (i, track) in pool.iter().enumerate() {
+            for (j, det) in detections_high.iter().enumerate() {
+                if track.class_id != det.class_id {
+                    cost[i][j] = f32::MAX;
+                }
+            }
+        }
 
         let outcome = byte_cascade::run(
             pool,
