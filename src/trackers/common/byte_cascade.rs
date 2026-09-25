@@ -9,7 +9,8 @@
 //! passes a plain IoU distance; BoT-SORT passes an appearance-fused cost. Camera motion
 //! is applied by BoT-SORT before the cascade runs. Everything else lives here once.
 
-use crate::utils::assignment::{greedy_match, iou_match};
+use crate::utils::assignment::greedy_match;
+use crate::utils::geometry::iou_cost_matrix;
 use crate::utils::kalman::KalmanFilter;
 
 /// A detection the cascade can read: its box and its score.
@@ -42,6 +43,11 @@ pub(crate) trait CascadeTrack: Sized + Clone {
     fn reactivate_matched(&mut self, det: &Self::Det, frame_id: usize, kf: &KalmanFilter);
     /// Create and activate a brand-new track from a detection.
     fn spawn(det: &Self::Det, frame_id: usize, track_id: u64, kf: &KalmanFilter) -> Self;
+    /// Whether this track may take the detection at all. The second stage checks it;
+    /// the first stage gets it through the caller's cost matrix.
+    fn accepts(&self, _det: &Self::Det) -> bool {
+        true
+    }
 }
 
 /// The tracks produced by one cascade pass, ready for the caller to commit.
@@ -106,8 +112,21 @@ pub(crate) fn run<T: CascadeTrack>(
         .filter(|&i| pool[i].is_tracked())
         .collect();
     let r_boxes: Vec<[f32; 4]> = r_tracked.iter().map(|&i| pool[i].cascade_tlwh()).collect();
-    let low_boxes: Vec<[f32; 4]> = low.iter().map(|d| d.det_box()).collect();
-    let (matches_low, u_track_low, _) = iou_match(&r_boxes, &low_boxes, second_match_thresh);
+    let (matches_low, u_track_low) = if r_tracked.is_empty() || low.is_empty() {
+        (Vec::new(), (0..r_tracked.len()).collect::<Vec<_>>())
+    } else {
+        let low_boxes: Vec<[f32; 4]> = low.iter().map(|d| d.det_box()).collect();
+        let mut cost = iou_cost_matrix(&r_boxes, &low_boxes);
+        for (local, &itrack) in r_tracked.iter().enumerate() {
+            for (j, det) in low.iter().enumerate() {
+                if !pool[itrack].accepts(det) {
+                    cost[local][j] = f32::MAX;
+                }
+            }
+        }
+        let (matches, u_track, _) = greedy_match(&cost, second_match_thresh);
+        (matches, u_track)
+    };
 
     for (local, idet) in matches_low {
         let itrack = r_tracked[local];

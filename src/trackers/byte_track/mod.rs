@@ -148,6 +148,9 @@ impl CascadeTrack for STrack {
         track.activate(kf, frame_id, track_id);
         track
     }
+    fn accepts(&self, det: &STrack) -> bool {
+        self.class_id == det.class_id
+    }
 }
 
 /// ByteTrack tracker implementation.
@@ -274,6 +277,17 @@ impl ByteTrack {
         }
     }
 
+    /// Change the confidence split and the spawn threshold without dropping any track.
+    ///
+    /// # Arguments
+    ///
+    /// * `track_thresh` - Score from which a detection is matched in the first stage.
+    /// * `det_thresh` - Smallest score an unmatched detection needs to start a new track.
+    pub fn set_thresholds(&mut self, track_thresh: f32, det_thresh: f32) {
+        self.track_thresh = track_thresh;
+        self.det_thresh = det_thresh;
+    }
+
     /// Update the tracker with detections from the current frame.
     ///
     /// # Arguments
@@ -313,15 +327,15 @@ impl ByteTrack {
         pool.append(&mut self.lost_stracks);
 
         // ByteTrack's stage-one cost is the plain IoU distance. Association is
-        // class-strict on top: a track never consumes a detection of another
-        // class, so a misclassification flicker starves instead of stealing
-        // the detections of the body it overlaps.
+        // class-strict on top, in both stages: a track never consumes a
+        // detection of another class, so a misclassification flicker starves
+        // instead of stealing the detections of the body it overlaps.
         let pool_boxes: Vec<[f32; 4]> = pool.iter().map(|s| s.tlwh).collect();
         let high_boxes: Vec<[f32; 4]> = detections_high.iter().map(|s| s.tlwh).collect();
         let mut cost = crate::utils::geometry::iou_cost_matrix(&pool_boxes, &high_boxes);
         for (i, track) in pool.iter().enumerate() {
             for (j, det) in detections_high.iter().enumerate() {
-                if track.class_id != det.class_id {
+                if !track.accepts(det) {
                     cost[i][j] = f32::MAX;
                 }
             }
@@ -644,5 +658,36 @@ mod tests {
         let out = lax.update(vec![low]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].track_id, id);
+    }
+
+    #[test]
+    fn low_confidence_detections_of_another_class_never_continue_a_track() {
+        let mut tracker = ByteTrack::new(0.5, 30, 0.9, 0.5);
+        let person = ([10.0, 10.0, 50.0, 100.0], 0.9_f32, 0_i64);
+        let id = tracker.update(vec![person])[0].track_id;
+        // The person is missed; a weak detection of another class covers the same spot.
+        let other = ([12.0, 12.0, 50.0, 100.0], 0.3_f32, 1_i64);
+        let out = tracker.update(vec![other]);
+        assert!(
+            out.iter().all(|t| t.track_id != id),
+            "the person track took the box of a weak detection of another class"
+        );
+    }
+
+    #[test]
+    fn lowered_thresholds_spawn_from_weaker_detections() {
+        let mut tracker = ByteTrack::new(0.5, 30, 0.9, 0.5);
+        assert!(
+            tracker
+                .update(vec![([10.0, 10.0, 50.0, 100.0], 0.4, 0)])
+                .is_empty()
+        );
+        tracker.set_thresholds(0.3, 0.3);
+        assert_eq!(
+            tracker
+                .update(vec![([10.0, 10.0, 50.0, 100.0], 0.4, 0)])
+                .len(),
+            1
+        );
     }
 }
