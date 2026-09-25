@@ -288,6 +288,17 @@ impl ByteTrack {
         self.det_thresh = det_thresh;
     }
 
+    /// Drop the velocity every lost track carries. After a camera move that velocity is
+    /// the camera's own motion, and a lost track coasting on it sweeps through the
+    /// picture and claims detections of other objects.
+    pub fn forget_lost_motion(&mut self) {
+        for track in &mut self.lost_stracks {
+            for i in 4..8 {
+                track.kalman.mean[i] = 0.0;
+            }
+        }
+    }
+
     /// Update the tracker with detections from the current frame.
     ///
     /// # Arguments
@@ -688,6 +699,22 @@ mod tests {
                 .update(vec![([10.0, 10.0, 50.0, 100.0], 0.4, 0)])
                 .len(),
             1
+        );
+    }
+    #[test]
+    fn a_lost_track_stops_coasting_once_told_to_forget_its_motion() {
+        let mut tracker = ByteTrack::new(0.5, 30, 0.9, 0.5);
+        for i in 0..5 {
+            tracker.update(vec![([10.0 + i as f32 * 20.0, 10.0, 20.0, 40.0], 0.9, 0)]);
+        }
+        tracker.update(vec![]);
+        tracker.forget_lost_motion();
+        let before = tracker.lost_stracks[0].tlwh;
+        tracker.update(vec![]);
+        let after = tracker.lost_stracks[0].tlwh;
+        assert!(
+            (after[0] - before[0]).abs() < 1e-3,
+            "{before:?} -> {after:?}"
         );
     }
 }
